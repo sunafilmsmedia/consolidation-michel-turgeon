@@ -1,0 +1,800 @@
+"use client";
+
+import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import type { CalculatorInput, DebtType } from "@/types/calculator";
+import PotentialGauge from "@/components/ui/PotentialGauge";
+import ProgressBar from "@/components/ui/ProgressBar";
+import LoadingAI from "./LoadingAI";
+import { computeLivePreview } from "@/lib/livePreview";
+import { formatCurrency } from "@/lib/format";
+import Link from "next/link";
+import {
+  DEBT_AMOUNT_OPTIONS,
+  DEBT_TYPE_OPTIONS,
+  HAS_MORTGAGE_OPTIONS,
+  INCOME_OPTIONS,
+  OWNERSHIP_OPTIONS,
+  PRIMARY_GOAL_OPTIONS,
+  PROPERTY_VALUE_OPTIONS,
+  type ChoiceOption,
+  type OwnershipChoice,
+} from "./questions";
+import { calculatorConfig } from "@/lib/config";
+
+type StepKey =
+  | "ownership"
+  | "primaryGoal"
+  | "debtTypes"
+  | "totalDebtAmount"
+  | "currentDebtMonthlyPayment"
+  | "hasMortgage"
+  | "propertyValue"
+  | "mortgageBalance"
+  | "mortgageMonthlyPayment"
+  | "income"
+  | "contact";
+
+interface Answers extends Partial<CalculatorInput> {
+  ownership?: OwnershipChoice;
+  hasMortgageChoice?: string;
+  dontKnowMortgagePayment?: boolean;
+  fullName?: string;
+}
+
+// Étapes à choix unique : un clic sélectionne ET avance instantanément.
+const AUTO_ADVANCE_STEPS = new Set<StepKey>([
+  "ownership",
+  "primaryGoal",
+  "totalDebtAmount",
+  "hasMortgage",
+  "propertyValue",
+  "income",
+]);
+
+export default function CalculatorForm() {
+  const router = useRouter();
+  const [answers, setAnswers] = useState<Answers>({});
+  const [stepIndex, setStepIndex] = useState(0);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const isOwner = answers.ownership === "owner";
+  const notOwner = answers.ownership === "not_owner";
+  const hasMortgage = answers.hasMortgageChoice === "yes" || answers.hasMortgageChoice === "unsure";
+
+  const steps = useMemo<StepKey[]>(() => {
+    // Tout le monde qui poursuit est propriétaire : les questions sur la
+    // propriété sont donc toujours posées.
+    const base: StepKey[] = [
+      "ownership",
+      "primaryGoal",
+      "debtTypes",
+      "totalDebtAmount",
+      "currentDebtMonthlyPayment",
+      "hasMortgage",
+      "propertyValue",
+    ];
+    if (hasMortgage) base.push("mortgageBalance", "mortgageMonthlyPayment");
+    base.push("income", "contact");
+    return base;
+  }, [hasMortgage]);
+
+  const clampedIndex = Math.min(stepIndex, steps.length - 1);
+  const currentStep = steps[clampedIndex];
+  const isAutoAdvance = AUTO_ADVANCE_STEPS.has(currentStep);
+
+  const preview = useMemo(() => computeLivePreview(answers), [answers]);
+
+  // Fourchette d'économie estimée, calculée en direct (teaser mobile).
+  const roundTo10 = (n: number) => Math.max(Math.round(n / 10) * 10, 0);
+  const previewLow = roundTo10(preview.monthlySavings * 0.85);
+  const previewHigh = roundTo10(preview.monthlySavings * 1.15);
+  const showMobilePreview =
+    preview.hasEnoughInfo && preview.monthlySavings > 0 && currentStep !== "contact";
+
+  function update(patch: Answers) {
+    setAnswers((prev) => ({ ...prev, ...patch }));
+    setError(null);
+  }
+
+  function goNext() {
+    if (clampedIndex < steps.length - 1) {
+      setStepIndex(clampedIndex + 1);
+    }
+  }
+
+  function goBack() {
+    if (clampedIndex > 0) setStepIndex(clampedIndex - 1);
+  }
+
+  const canContinue = useMemo(
+    () => validateStep(currentStep, answers),
+    [currentStep, answers]
+  );
+
+  async function handleSubmit() {
+    setSubmitting(true);
+    setError(null);
+
+    const payload = buildPayload(answers);
+    const startedAt = Date.now();
+
+    try {
+      const res = await fetch("/api/submit-lead", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        setError(
+          data.error ?? "Il manque quelques informations avant de générer ton résultat."
+        );
+        setSubmitting(false);
+        return;
+      }
+
+      // Délai minimum pour l'écran de chargement IA (perception de valeur).
+      const elapsed = Date.now() - startedAt;
+      const wait = Math.max(1000 - elapsed, 0);
+      sessionStorage.setItem(
+        `result:${data.leadId}`,
+        JSON.stringify({ result: data.result, firstName: payload.firstName })
+      );
+      setTimeout(() => router.push(data.resultUrl), wait);
+    } catch {
+      setError("Une erreur est survenue. Réessaie dans un instant.");
+      setSubmitting(false);
+    }
+  }
+
+  if (submitting) {
+    return (
+      <main className="min-h-screen bg-gradient-to-b from-white via-white to-tint">
+        <LoadingAI />
+      </main>
+    );
+  }
+
+  // Filtre : sans propriété, la consolidation via un courtier hypothécaire ne
+  // s'applique pas. On arrête le parcours ici, sans générer de lead.
+  if (notOwner) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-gradient-to-b from-white via-white to-tint px-6 text-center">
+        <div className="max-w-lg animate-fadeUp">
+          <span className="mx-auto flex h-14 w-14 items-center justify-center rounded-full border border-line bg-white text-2xl shadow-card">
+            🔑
+          </span>
+          <h1 className="mt-6 font-serif text-2xl font-bold leading-tight text-ink sm:text-3xl">
+            Cet outil est conçu pour les propriétaires
+          </h1>
+          <p className="mt-4 text-base leading-relaxed text-muted">
+            La consolidation par un courtier hypothécaire repose sur l&apos;équité de ta
+            propriété : on refinance l&apos;hypothèque pour rembourser tes autres dettes et te
+            ramener à un seul paiement. Sans propriété, cette avenue ne s&apos;applique
+            malheureusement pas.
+          </p>
+          <p className="mt-3 text-sm text-muted">
+            Si tu deviens propriétaire un jour, ou si tu as une propriété au nom d&apos;un proche,
+            reviens nous voir — {calculatorConfig.brokerName} pourra analyser tes options.
+          </p>
+          <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:justify-center">
+            <button
+              onClick={() => {
+                update({ ownership: undefined });
+                setStepIndex(0);
+              }}
+              className="inline-flex h-12 items-center justify-center rounded-2xl border border-line px-6 text-sm font-semibold text-ink transition hover:bg-tint"
+            >
+              Revenir en arrière
+            </button>
+            <Link
+              href="/"
+              className="inline-flex h-12 items-center justify-center rounded-2xl bg-primary px-6 text-sm font-bold text-white shadow-glow transition hover:bg-primary-light"
+            >
+              Retour à l&apos;accueil
+            </Link>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  return (
+    <main className="min-h-screen bg-gradient-to-b from-white via-white to-tint">
+      <div className="mx-auto grid max-w-[1280px] gap-10 px-6 py-10 lg:grid-cols-[1fr_360px] lg:py-16">
+        <div>
+          {/* Estimation en direct — visible en haut sur mobile seulement */}
+          {showMobilePreview && (
+            <div className="sticky top-3 z-20 mb-5 lg:hidden">
+              <div className="rounded-2xl border border-line bg-white/95 px-4 py-3 text-center shadow-card backdrop-blur">
+                <span className="caps-label text-[10px] font-semibold text-primary">
+                  Estimation en direct
+                </span>
+                <p className="mt-0.5 text-xl font-extrabold text-ink">
+                  <span className="select-none blur-[7px]">
+                    {formatCurrency(previewLow)} – {formatCurrency(previewHigh)}
+                  </span>
+                  <span className="ml-1 text-xs font-semibold text-muted">/ mois</span>
+                </p>
+                <p className="mt-0.5 text-[10px] font-medium text-muted">
+                  🔒 Débloque le montant à la fin
+                </p>
+              </div>
+            </div>
+          )}
+
+          <ProgressBar current={clampedIndex + 1} total={steps.length} />
+
+          <div key={currentStep} className="mt-8 animate-fadeUp">
+            <StepContent
+              step={currentStep}
+              answers={answers}
+              update={update}
+              advance={goNext}
+              isOwner={isOwner}
+            />
+          </div>
+
+          {error && (
+            <p className="mt-4 rounded-xl border border-danger/30 bg-danger/5 px-4 py-3 text-sm text-danger">
+              {error}
+            </p>
+          )}
+
+          <div className="mt-8 flex items-center gap-3">
+            {clampedIndex > 0 && (
+              <button
+                onClick={goBack}
+                className="h-14 rounded-2xl border border-line px-6 text-sm font-semibold text-ink transition hover:bg-tint"
+              >
+                Retour
+              </button>
+            )}
+            {currentStep === "contact" ? (
+              <button
+                onClick={handleSubmit}
+                disabled={!canContinue}
+                className="h-14 flex-1 rounded-2xl bg-primary px-8 text-base font-bold text-white shadow-glow transition enabled:hover:bg-primary-light disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Voir mon résultat
+              </button>
+            ) : isAutoAdvance ? (
+              <p className="text-sm text-muted">Touche une réponse pour continuer →</p>
+            ) : (
+              <button
+                onClick={goNext}
+                disabled={!canContinue}
+                className="h-14 flex-1 rounded-2xl bg-primary px-8 text-base font-bold text-white shadow-glow transition enabled:hover:bg-primary-light disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Continuer
+              </button>
+            )}
+          </div>
+        </div>
+
+        <aside className="hidden lg:block">
+          <PotentialGauge
+            score={preview.score}
+            level={preview.level}
+            hasEnoughInfo={preview.hasEnoughInfo}
+          />
+        </aside>
+      </div>
+    </main>
+  );
+}
+
+/* --------------------------- Validation par étape --------------------------- */
+
+function validateStep(step: StepKey, a: Answers): boolean {
+  switch (step) {
+    case "ownership":
+      return !!a.ownership;
+    case "primaryGoal":
+      return !!a.primaryGoal;
+    case "debtTypes":
+      return !!a.debtTypes && a.debtTypes.length > 0;
+    case "totalDebtAmount":
+      return typeof a.totalDebtAmount === "number";
+    case "currentDebtMonthlyPayment":
+      return typeof a.currentDebtMonthlyPayment === "number" && a.currentDebtMonthlyPayment > 0;
+    case "hasMortgage":
+      return !!a.hasMortgageChoice;
+    case "propertyValue":
+      return typeof a.propertyValue === "number";
+    case "mortgageBalance":
+      return typeof a.mortgageBalance === "number";
+    case "mortgageMonthlyPayment":
+      return (
+        a.dontKnowMortgagePayment === true ||
+        typeof a.mortgageMonthlyPayment === "number"
+      );
+    case "income":
+      return !!a.householdIncomeRange;
+    case "contact":
+      return (
+        !!a.fullName?.trim() &&
+        !!a.email?.trim() &&
+        /.+@.+\..+/.test(a.email ?? "") &&
+        !!a.phone?.trim() &&
+        a.consentContact === true
+      );
+    default:
+      return false;
+  }
+}
+
+/* ------------------------------- Payload final ------------------------------ */
+
+function buildPayload(a: Answers): CalculatorInput {
+  // Seuls les propriétaires atteignent cette étape (filtre en amont).
+  const propertyPaid = a.hasMortgageChoice === "no";
+
+  // "Nom complet" → prénom (premier mot) + nom (le reste), pour le CRM et l'IA.
+  const nameParts = (a.fullName ?? "").trim().split(/\s+/).filter(Boolean);
+  const firstName = nameParts[0] ?? "";
+  const lastName = nameParts.slice(1).join(" ") || undefined;
+
+  return {
+    firstName,
+    lastName,
+    email: a.email?.trim() ?? "",
+    phone: a.phone?.trim() ?? "",
+    userStatus: "owner",
+    primaryGoal: a.primaryGoal!,
+    debtTypes: a.debtTypes ?? [],
+    totalDebtAmount: a.totalDebtAmount ?? 0,
+    currentDebtMonthlyPayment: a.currentDebtMonthlyPayment,
+    ownsProperty: true,
+    hasMortgage: !propertyPaid,
+    propertyValue: a.propertyValue,
+    mortgageBalance: propertyPaid ? 0 : a.mortgageBalance,
+    mortgageMonthlyPayment: a.dontKnowMortgagePayment ? undefined : a.mortgageMonthlyPayment,
+    householdIncomeRange: a.householdIncomeRange,
+    consentContact: a.consentContact === true,
+  };
+}
+
+/* ------------------------------- Rendu étapes ------------------------------- */
+
+interface StepContentProps {
+  step: StepKey;
+  answers: Answers;
+  update: (patch: Answers) => void;
+  advance: () => void;
+  isOwner: boolean;
+}
+
+function StepContent({ step, answers, update, advance }: StepContentProps) {
+  // Choix unique : on sélectionne ET on passe à l'étape suivante immédiatement.
+  const pick = (patch: Answers) => {
+    update(patch);
+    advance();
+  };
+
+  switch (step) {
+    case "ownership":
+      return (
+        <SingleChoice
+          title="Es-tu propriétaire de ta maison ou de ton condo?"
+          options={OWNERSHIP_OPTIONS}
+          value={answers.ownership}
+          onSelect={(v) => pick({ ownership: v })}
+        />
+      );
+    case "primaryGoal":
+      return (
+        <SingleChoice
+          title="Qu'est-ce que tu aimerais améliorer en premier?"
+          options={PRIMARY_GOAL_OPTIONS}
+          value={answers.primaryGoal}
+          onSelect={(v) => pick({ primaryGoal: v })}
+        />
+      );
+    case "debtTypes":
+      return (
+        <MultiChoice
+          title="Quels types de dettes as-tu actuellement?"
+          subtitle="Tu peux en choisir plusieurs."
+          options={DEBT_TYPE_OPTIONS}
+          values={answers.debtTypes ?? []}
+          onChange={(vals) => update({ debtTypes: vals })}
+        />
+      );
+    case "totalDebtAmount":
+      return (
+        <RangeChoice
+          title="Environ combien dois-tu au total, sans compter ton hypothèque?"
+          options={DEBT_AMOUNT_OPTIONS}
+          value={answers.totalDebtAmount}
+          onSelect={(v) => pick({ totalDebtAmount: v })}
+        />
+      );
+    case "currentDebtMonthlyPayment":
+      return (
+        <NumberWithUnknown
+          title="Combien paies-tu environ chaque mois pour ces dettes?"
+          placeholder="Ex. 850 $ / mois"
+          value={answers.currentDebtMonthlyPayment}
+          unknown={false}
+          allowUnknown={false}
+          onValue={(v) => update({ currentDebtMonthlyPayment: v })}
+          onUnknown={() => {}}
+        />
+      );
+    case "hasMortgage":
+      return (
+        <SingleChoice
+          title="As-tu actuellement une hypothèque sur ta propriété?"
+          options={HAS_MORTGAGE_OPTIONS}
+          value={answers.hasMortgageChoice}
+          onSelect={(v) => pick({ hasMortgageChoice: v })}
+        />
+      );
+    case "propertyValue":
+      return (
+        <RangeChoice
+          title="Quelle est la valeur approximative de ta propriété aujourd'hui?"
+          options={PROPERTY_VALUE_OPTIONS}
+          value={answers.propertyValue}
+          onSelect={(v) => pick({ propertyValue: v })}
+        />
+      );
+    case "mortgageBalance":
+      return (
+        <NumberWithUnknown
+          title="Combien te reste-t-il à payer sur ton hypothèque?"
+          placeholder="Ex. 300 000 $"
+          greenHint="Entre un montant approximatif — « environ » suffit."
+          value={answers.mortgageBalance}
+          unknown={false}
+          allowUnknown={false}
+          onValue={(v) => update({ mortgageBalance: v })}
+          onUnknown={() => {}}
+        />
+      );
+    case "mortgageMonthlyPayment":
+      return (
+        <NumberWithUnknown
+          title="Ton paiement hypothécaire actuel est d'environ combien par mois?"
+          placeholder="Ex. 2 100 $ / mois"
+          value={answers.mortgageMonthlyPayment}
+          unknown={answers.dontKnowMortgagePayment ?? false}
+          onValue={(v) =>
+            update({ mortgageMonthlyPayment: v, dontKnowMortgagePayment: false })
+          }
+          onUnknown={() =>
+            update({ dontKnowMortgagePayment: true, mortgageMonthlyPayment: undefined })
+          }
+        />
+      );
+    case "income":
+      return (
+        <SingleChoice
+          title="Quel est le revenu annuel approximatif de ton foyer avant impôts?"
+          options={INCOME_OPTIONS}
+          value={answers.householdIncomeRange}
+          onSelect={(v) => pick({ householdIncomeRange: v })}
+        />
+      );
+    case "contact":
+      return <ContactStep answers={answers} update={update} />;
+    default:
+      return null;
+  }
+}
+
+/* ------------------------------ Sous-composants ----------------------------- */
+
+function StepTitle({ title, subtitle }: { title: string; subtitle?: string }) {
+  return (
+    <div className="mb-6">
+      <h2 className="font-serif text-2xl font-bold leading-tight text-ink sm:text-3xl">{title}</h2>
+      {subtitle && <p className="mt-2 text-sm text-muted">{subtitle}</p>}
+    </div>
+  );
+}
+
+function SingleChoice<T extends string>({
+  title,
+  options,
+  value,
+  onSelect,
+}: {
+  title: string;
+  options: ChoiceOption<T>[];
+  value?: T;
+  onSelect: (v: T) => void;
+}) {
+  return (
+    <div>
+      <StepTitle title={title} />
+      <div className="grid gap-3">
+        {options.map((opt) => (
+          <OptionButton
+            key={opt.value}
+            label={opt.label}
+            selected={value === opt.value}
+            onClick={() => onSelect(opt.value)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RangeChoice({
+  title,
+  options,
+  value,
+  onSelect,
+}: {
+  title: string;
+  options: ChoiceOption<number>[];
+  value?: number;
+  onSelect: (v: number) => void;
+}) {
+  return (
+    <div>
+      <StepTitle title={title} subtitle="Choisis la plage qui se rapproche le plus." />
+      <div className="grid gap-3 sm:grid-cols-2">
+        {options.map((opt) => (
+          <OptionButton
+            key={opt.label}
+            label={opt.label}
+            selected={value === opt.value}
+            onClick={() => onSelect(opt.value)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MultiChoice<T extends string>({
+  title,
+  subtitle,
+  options,
+  values,
+  onChange,
+}: {
+  title: string;
+  subtitle?: string;
+  options: ChoiceOption<T>[];
+  values: T[];
+  onChange: (v: T[]) => void;
+}) {
+  function toggle(v: T) {
+    // "none" est exclusif.
+    if (v === ("none" as T)) {
+      onChange(values.includes(v) ? [] : [v]);
+      return;
+    }
+    const withoutNone = values.filter((x) => x !== ("none" as T));
+    onChange(
+      withoutNone.includes(v) ? withoutNone.filter((x) => x !== v) : [...withoutNone, v]
+    );
+  }
+
+  return (
+    <div>
+      <StepTitle title={title} subtitle={subtitle} />
+      <div className="grid gap-3 sm:grid-cols-2">
+        {options.map((opt) => (
+          <OptionButton
+            key={opt.value}
+            label={opt.label}
+            selected={values.includes(opt.value)}
+            multi
+            onClick={() => toggle(opt.value)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function OptionButton({
+  label,
+  selected,
+  onClick,
+  multi = false,
+}: {
+  label: string;
+  selected: boolean;
+  onClick: () => void;
+  multi?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-3 rounded-2xl border px-5 py-4 text-left text-sm font-semibold transition ${
+        selected
+          ? "border-primary bg-primary/5 text-ink shadow-glow"
+          : "border-line bg-white text-ink hover:border-primary/40 hover:bg-tint"
+      }`}
+    >
+      <span
+        className={`flex h-5 w-5 shrink-0 items-center justify-center border text-[10px] ${
+          multi ? "rounded-md" : "rounded-full"
+        } ${selected ? "border-primary bg-primary text-white" : "border-line"}`}
+      >
+        {selected ? "✓" : ""}
+      </span>
+      {label}
+    </button>
+  );
+}
+
+function NumberWithUnknown({
+  title,
+  placeholder,
+  value,
+  unknown,
+  onValue,
+  onUnknown,
+  allowUnknown = true,
+  greenHint,
+}: {
+  title: string;
+  placeholder: string;
+  value?: number;
+  unknown: boolean;
+  onValue: (v: number | undefined) => void;
+  onUnknown: () => void;
+  allowUnknown?: boolean;
+  greenHint?: string;
+}) {
+  return (
+    <div>
+      <StepTitle title={title} />
+      <div className="relative">
+        <input
+          type="text"
+          inputMode="numeric"
+          placeholder={placeholder}
+          value={value ?? ""}
+          disabled={unknown}
+          autoFocus
+          onChange={(e) => {
+            const digits = e.target.value.replace(/[^\d]/g, "");
+            onValue(digits ? Number(digits) : undefined);
+          }}
+          className="h-14 w-full rounded-2xl border border-line bg-white px-5 text-lg font-semibold text-ink placeholder:text-muted/60 focus:border-primary focus:outline-none disabled:bg-tint disabled:text-muted"
+        />
+      </div>
+      {greenHint && (
+        <p className="mt-2 text-sm font-semibold text-positive">{greenHint}</p>
+      )}
+      {allowUnknown && (
+        <>
+          <button
+            onClick={onUnknown}
+            className={`mt-4 rounded-xl border px-4 py-2 text-sm font-medium transition ${
+              unknown
+                ? "border-primary bg-primary/5 text-ink"
+                : "border-line text-muted hover:bg-tint"
+            }`}
+          >
+            Je ne sais pas
+          </button>
+          <p className="mt-3 text-xs text-muted">
+            Si tu ne sais pas, on estimera ce montant à partir de tes autres réponses.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ContactStep({
+  answers,
+  update,
+}: {
+  answers: Answers;
+  update: (patch: Answers) => void;
+}) {
+  const preview = computeLivePreview(answers);
+  const savings = preview.monthlySavings;
+  const hasSavings = savings >= 50;
+  const roundTo10 = (n: number) => Math.max(Math.round(n / 10) * 10, 0);
+  const low = roundTo10(savings * 0.85);
+  const high = roundTo10(savings * 1.15);
+
+  return (
+    <div>
+      {/* Estimation compacte */}
+      <div className="rounded-2xl border border-primary/20 bg-primary/5 p-4 text-center">
+        <span className="caps-label text-[11px] font-semibold text-primary">Ton estimation</span>
+        {hasSavings ? (
+          <>
+            <p className="mt-1 text-sm text-muted">Tu pourrais potentiellement économiser</p>
+            <p className="mt-0.5 font-serif text-2xl font-bold text-ink sm:text-3xl">
+              <span className="select-none blur-[8px]">
+                {formatCurrency(low)} – {formatCurrency(high)}
+              </span>
+              <span className="ml-1 text-sm font-semibold text-muted">/ mois</span>
+            </p>
+            <p className="mt-1.5 text-xs font-semibold text-primary">
+              🔒 Laisse tes coordonnées ci-dessous pour dévoiler ton montant
+            </p>
+          </>
+        ) : (
+          <p className="mt-1 text-sm text-muted">
+            Ta situation mérite une analyse plus poussée — une consolidation pourrait
+            simplifier tes paiements.
+          </p>
+        )}
+      </div>
+
+      {/* Formulaire compact */}
+      <h2 className="mt-4 font-serif text-lg font-bold leading-tight text-ink">
+        Vérifie si c&apos;est possible pour toi
+      </h2>
+      <p className="mt-0.5 text-xs text-muted">
+        Laisse tes coordonnées : {calculatorConfig.brokerName} analyse ton dossier et te confirme
+        tes vraies options. Gratuit, sans engagement.
+      </p>
+
+      <div className="mt-3 space-y-2.5">
+        <Field
+          label="Nom complet"
+          value={answers.fullName ?? ""}
+          onChange={(v) => update({ fullName: v })}
+        />
+        <Field
+          label="Courriel"
+          type="email"
+          value={answers.email ?? ""}
+          onChange={(v) => update({ email: v })}
+        />
+        <Field
+          label="Numéro de téléphone"
+          type="tel"
+          value={answers.phone ?? ""}
+          onChange={(v) => update({ phone: v })}
+        />
+      </div>
+
+      <label className="mt-3 flex cursor-pointer items-start gap-2 text-xs text-muted">
+        <input
+          type="checkbox"
+          checked={answers.consentContact === true}
+          onChange={(e) => update({ consentContact: e.target.checked })}
+          className="mt-0.5 h-4 w-4 rounded border-line accent-primary"
+        />
+        J&apos;accepte d&apos;être contacté au sujet de mon analyse et de mes options de
+        consolidation.
+      </label>
+    </div>
+  );
+}
+
+function Field({
+  label,
+  value,
+  onChange,
+  type = "text",
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  type?: string;
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-muted">
+        {label}
+      </span>
+      <input
+        type={type}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full rounded-xl border border-line bg-white px-3.5 py-2.5 text-sm text-ink placeholder:text-muted/60 focus:border-primary focus:outline-none"
+      />
+    </label>
+  );
+}

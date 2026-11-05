@@ -1,0 +1,58 @@
+import type { CalculatorInput } from "@/types/calculator";
+import { runCalculations } from "./calculations";
+import { calculateSavingsScore, scoreToLevel } from "./scoring";
+import type { PotentialLevel } from "@/types/calculator";
+
+export interface LivePreview {
+  score: number;
+  level: PotentialLevel | null;
+  hasEnoughInfo: boolean;
+  monthlySavings: number;
+}
+
+/**
+ * Score approximatif côté client pour faire évoluer le thermomètre
+ * au fil des réponses, SANS afficher de montant précis.
+ * Retourne hasEnoughInfo=false tant qu'on n'a pas assez de données.
+ */
+export function computeLivePreview(answers: Partial<CalculatorInput>): LivePreview {
+  const hasEnoughInfo =
+    answers.debtTypes !== undefined &&
+    answers.debtTypes.length > 0 &&
+    typeof answers.totalDebtAmount === "number";
+
+  if (!hasEnoughInfo) {
+    return { score: 0, level: null, hasEnoughInfo: false, monthlySavings: 0 };
+  }
+
+  const input: CalculatorInput = {
+    firstName: answers.firstName ?? "",
+    email: answers.email ?? "",
+    phone: answers.phone ?? "",
+    userStatus: "owner",
+    primaryGoal: answers.primaryGoal ?? "explore_options",
+    debtTypes: answers.debtTypes!,
+    totalDebtAmount: answers.totalDebtAmount ?? 0,
+    currentDebtMonthlyPayment: answers.currentDebtMonthlyPayment,
+    ownsProperty: true,
+    hasMortgage: answers.hasMortgage,
+    propertyValue: answers.propertyValue,
+    mortgageBalance: answers.mortgageBalance,
+    mortgageMonthlyPayment: answers.mortgageMonthlyPayment,
+    householdIncomeRange: answers.householdIncomeRange,
+    consentContact: true,
+  };
+
+  const calc = runCalculations(input);
+  const score = calculateSavingsScore(input, {
+    estimatedCurrentDebtPayment: calc.estimatedCurrentDebtPayment,
+    availableEquity: calc.availableEquity,
+  });
+
+  return {
+    score,
+    level: scoreToLevel(score),
+    hasEnoughInfo: true,
+    monthlySavings: calc.estimatedMonthlySavings,
+  };
+}
