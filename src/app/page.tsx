@@ -1,4 +1,3 @@
-import PotentialGauge from "@/components/ui/PotentialGauge";
 import BrokerCard from "@/components/ui/BrokerCard";
 import TrackedLink from "@/components/ui/TrackedLink";
 import { calculatorConfig } from "@/lib/config";
@@ -6,14 +5,13 @@ import { calculatorConfig } from "@/lib/config";
 export default function LandingPage() {
   return (
     <main className="min-h-screen bg-gradient-to-b from-white via-white to-tint">
-      <header className="mx-auto flex w-full max-w-[1280px] justify-center px-6 pt-8 lg:justify-start">
+      <header className="mx-auto flex w-full max-w-[1280px] justify-center px-6 pt-8">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src="/logo-mt.png" alt={calculatorConfig.brokerName} className="h-16 w-auto" />
       </header>
 
-      <div className="mx-auto flex max-w-[1280px] flex-col gap-12 px-6 py-10 lg:flex-row lg:items-center lg:py-16">
-        {/* Colonne gauche */}
-        <div className="flex-1 animate-fadeUp text-center lg:text-left">
+      <div className="mx-auto flex max-w-[800px] flex-col items-center gap-10 px-6 py-10 text-center lg:py-16">
+        <div className="animate-fadeUp">
           <span className="caps-label inline-flex items-center gap-2 rounded-full border border-line bg-white px-4 py-1.5 text-[11px] font-semibold text-primary shadow-card">
             🔒 Gratuit · Sans engagement · Aucun impact sur ton crédit
           </span>
@@ -29,7 +27,7 @@ export default function LandingPage() {
             personnalisée par {calculatorConfig.brokerName}.
           </p>
 
-          <div className="mt-8 flex justify-center lg:justify-start">
+          <div className="mt-8 flex justify-center">
             <TrackedLink
               href="/calculator"
               event="ViewContent"
@@ -46,9 +44,7 @@ export default function LandingPage() {
           </div>
         </div>
 
-        {/* Colonne droite */}
-        <div className="flex w-full flex-col gap-4 lg:w-[40%]">
-          <PotentialGauge score={0} level={null} hasEnoughInfo={false} />
+        <div className="w-full max-w-sm">
           <BrokerCard />
         </div>
       </div>
