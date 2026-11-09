@@ -33,7 +33,8 @@ export default function ResultView({ leadId }: { leadId: string }) {
       // Garde anti-doublon : une seule fois par lead, même si la page est rafraîchie.
       const firedKey = `lead-fired:${leadId}`;
       if (!sessionStorage.getItem(firedKey)) {
-        trackPixel("Lead");
+        // Même event_id que le Lead envoyé côté serveur (CAPI) → dédupliqué par Meta.
+        trackPixel("Lead", {}, leadId);
         sessionStorage.setItem(firedKey, "1");
       }
     }
